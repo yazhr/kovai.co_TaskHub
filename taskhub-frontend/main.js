@@ -17,7 +17,10 @@ import {
 
 const h = React.createElement;
 const API_BASE = 'http://localhost:4000';
-const NAV_ITEMS = ['Overview', 'Tasks', 'Insights', 'Activity', 'Help'];
+const ADMIN_EMAIL = 'admin@taskhub.com';
+const makeUserId = (email) => btoa(email.toLowerCase()).replace(/=/g, '').slice(0, 28);
+const ADMIN_UID = makeUserId(ADMIN_EMAIL);
+const NAV_ITEMS = ['Overview', 'Tasks', 'Insights', 'Activity', 'Calendar', 'Help'];
 const STATUS_OPTIONS = ['Planned', 'In Progress', 'Complete'];
 const PRIORITY_OPTIONS = ['Low', 'Medium', 'High'];
 const STATUS_META = {
@@ -35,6 +38,8 @@ const NAV_META = {
   Tasks: { icon: 'clipboard-list' },
   Insights: { icon: 'chart-area' },
   Activity: { icon: 'activity' },
+  Calendar: { icon: 'calendar' },
+  Admin: { icon: 'shield' },
   Help: { icon: 'help-circle' },
 };
 
@@ -66,6 +71,8 @@ function Icon({ name, className = 'h-4 w-4' }) {
     'clipboard-list': h('path', { d: 'M9 4h6a1 1 0 0 1 1 1v2H8V5a1 1 0 0 1 1-1Z' }),
     'chart-area': [h('path', { key: 'a', d: 'M4 19h16' }), h('path', { key: 'b', d: 'M5 17 9 11l4 3 5-8 2 3' })],
     activity: [h('path', { key: 'a', d: 'M4 12h4l2-5 4 10 2-5h4' }), h('circle', { key: 'b', cx: '20', cy: '12', r: '1.5' })],
+    calendar: [h('path', { key: 'a', d: 'M8 2v4' }), h('path', { key: 'b', d: 'M16 2v4' }), h('path', { key: 'c', d: 'M3 10h18' }), h('path', { key: 'd', d: 'M5 6h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z' })],
+    shield: [h('path', { key: 'a', d: 'M12 3 20 6v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V6l8-3Z' }), h('path', { key: 'b', d: 'M9 12h6' })],
     'help-circle': [h('circle', { key: 'a', cx: '12', cy: '12', r: '9' }), h('path', { key: 'b', d: 'M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1.5 1.1-1.5 2.2' }), h('circle', { key: 'c', cx: '12', cy: '17', r: '1' })],
   };
 
@@ -158,8 +165,13 @@ async function signInWithGoogle() {
   const email = window.prompt('Enter your Google email for this assessment login:');
   if (!email) return null;
   const displayName = email.split('@')[0];
-  const uid = btoa(email.toLowerCase()).replace(/=/g, '').slice(0, 28);
-  return { uid, displayName, email };
+  const uid = makeUserId(email);
+  return {
+    uid,
+    displayName: email.toLowerCase() === ADMIN_EMAIL ? 'Admin' : displayName,
+    email,
+    isAdmin: email.toLowerCase() === ADMIN_EMAIL,
+  };
 }
 
 async function fetchTasks(userId) {
@@ -168,11 +180,17 @@ async function fetchTasks(userId) {
   return response.json();
 }
 
-async function createTask(userId, title, priority = 'Medium') {
+async function fetchAdminOverview(userId) {
+  const response = await fetch(`${API_BASE}/tasks/admin/overview`, { headers: { 'x-user-id': userId } });
+  if (!response.ok) throw new Error('Failed to fetch admin overview');
+  return response.json();
+}
+
+async function createTask(userId, title, priority = 'Medium', userName = '', userEmail = '') {
   const response = await fetch(`${API_BASE}/tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-user-id': userId },
-    body: JSON.stringify({ title, priority }),
+    body: JSON.stringify({ title, priority, userName, userEmail }),
   });
   if (!response.ok) throw new Error('Failed to create task');
   return response.json();
@@ -470,6 +488,7 @@ function ProductivitySection({ stats, progress, weeklyData, productivityScore, c
 function App() {
   const [user, setUser] = useState(null);
   const [tasks, setTasks] = useState([]);
+  const [adminOverview, setAdminOverview] = useState(null);
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState('Medium');
   const [query, setQuery] = useState('');
@@ -488,13 +507,28 @@ function App() {
   useEffect(() => {
     if (!user) return;
     setLoading(true);
-    fetchTasks(user.uid)
-      .then((data) => {
-        setTasks(data);
+    const loadWorkspace = async () => {
+      try {
+        if (user.isAdmin || user.email?.toLowerCase() === ADMIN_EMAIL) {
+          const overview = await fetchAdminOverview(user.uid);
+          setAdminOverview(overview);
+          setTasks(overview.tasks || []);
+          setCurrentPage('Admin');
+        } else {
+          const data = await fetchTasks(user.uid);
+          setTasks(data);
+          setAdminOverview(null);
+          setCurrentPage('Overview');
+        }
         setError('');
-      })
-      .catch(() => setError('Could not load tasks'))
-      .finally(() => setLoading(false));
+      } catch (err) {
+        setError('Could not load workspace data');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadWorkspace();
   }, [user]);
 
   const pushToast = (type, titleText, message) => {
@@ -560,6 +594,56 @@ function App() {
     });
   }, [tasks]);
 
+  const calendarDays = useMemo(() => {
+    const today = new Date();
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const gridStart = new Date(monthStart);
+    gridStart.setDate(monthStart.getDate() - monthStart.getDay());
+
+    return Array.from({ length: 42 }, (_, index) => {
+      const date = new Date(gridStart);
+      date.setDate(gridStart.getDate() + index);
+      const dayKey = dateKey(date);
+      const dayTasks = tasks.filter((task) => dateKey(new Date(task.updatedAt || task.createdAt)) === dayKey);
+
+      return {
+        date,
+        day: date.getDate(),
+        inMonth: date.getMonth() === today.getMonth(),
+        isToday: dayKey === dateKey(today),
+        count: dayTasks.length,
+        completed: dayTasks.filter((task) => task.status === 'Complete').length,
+      };
+    });
+  }, [tasks]);
+
+  const calendarMonthLabel = useMemo(() => {
+    const today = new Date();
+    return today.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  }, []);
+
+  const calendarMonths = useMemo(() => {
+    const year = new Date().getFullYear();
+
+    return Array.from({ length: 12 }, (_, monthIndex) => {
+      const monthTasks = tasks.filter((task) => {
+        const taskDate = new Date(task.updatedAt || task.createdAt);
+        return taskDate.getFullYear() === year && taskDate.getMonth() === monthIndex;
+      });
+
+      return {
+        monthIndex,
+        label: new Date(year, monthIndex, 1).toLocaleDateString(undefined, { month: 'long' }),
+        tasks: monthTasks,
+        total: monthTasks.length,
+        completed: monthTasks.filter((task) => task.status === 'Complete').length,
+        inProgress: monthTasks.filter((task) => task.status === 'In Progress').length,
+        planned: monthTasks.filter((task) => task.status === 'Planned').length,
+        isCurrentMonth: monthIndex === new Date().getMonth(),
+      };
+    });
+  }, [tasks]);
+
   const productivityScore = useMemo(() => {
     const weekCompleted = weeklyData.reduce((sum, day) => sum + day.completed, 0);
     const weekCreated = weeklyData.reduce((sum, day) => sum + day.created, 0);
@@ -582,6 +666,7 @@ function App() {
     window.localStorage.removeItem('taskhub-user');
     setUser(null);
     setTasks([]);
+    setAdminOverview(null);
     setCurrentPage('Overview');
   };
 
@@ -589,10 +674,16 @@ function App() {
     if (!title.trim()) return;
     try {
       setError('');
-      await createTask(user.uid, title.trim(), priority);
+      await createTask(user.uid, title.trim(), priority, user.displayName, user.email);
       setTitle('');
       setPriority('Medium');
-      setTasks(await fetchTasks(user.uid));
+      if (user.isAdmin || user.email?.toLowerCase() === ADMIN_EMAIL) {
+        const overview = await fetchAdminOverview(user.uid);
+        setAdminOverview(overview);
+        setTasks(overview.tasks || []);
+      } else {
+        setTasks(await fetchTasks(user.uid));
+      }
       pushToast('success', 'Task created', 'The new task was added successfully.');
     } catch {
       setError('Could not create task');
@@ -624,38 +715,65 @@ function App() {
     }
   };
 
+  const isAdmin = user?.isAdmin || user?.email?.toLowerCase() === ADMIN_EMAIL;
+  const visibleNavItems = isAdmin ? [...NAV_ITEMS, 'Admin'] : NAV_ITEMS;
+
+  useEffect(() => {
+    if (!user) return;
+    setCurrentPage(isAdmin ? 'Admin' : 'Overview');
+  }, [user?.uid, isAdmin]);
+
   if (!user) {
     return h(
       'main',
       {
         className:
-          'min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.10),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(99,102,241,0.10),_transparent_24%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] text-slate-900',
+          'relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.14),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(99,102,241,0.12),_transparent_24%),radial-gradient(circle_at_bottom_left,_rgba(34,197,94,0.08),_transparent_22%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] text-slate-900',
       },
+      h('div', { className: 'pointer-events-none absolute inset-x-0 top-[-120px] mx-auto h-72 w-72 rounded-full bg-blue-300/20 blur-3xl' }),
+      h('div', { className: 'pointer-events-none absolute bottom-[-140px] right-[-90px] h-80 w-80 rounded-full bg-indigo-300/20 blur-3xl' }),
       h(
         'div',
-        { className: 'mx-auto flex min-h-screen w-full max-w-7xl items-center px-4 py-8 sm:px-6 lg:px-8' },
+        { className: 'relative mx-auto flex min-h-screen w-full max-w-7xl items-center px-4 py-8 sm:px-6 lg:px-8' },
         h(
           'section',
           {
             className:
-              'grid w-full gap-8 overflow-hidden rounded-[32px] border border-slate-200 bg-white/85 p-6 shadow-[0_30px_90px_rgba(15,23,42,0.10)] backdrop-blur xl:grid-cols-[1.2fr_0.8fr] xl:p-8',
+              'grid w-full gap-8 overflow-hidden rounded-[32px] border border-slate-200/80 bg-white/88 p-6 shadow-[0_30px_90px_rgba(15,23,42,0.10)] backdrop-blur-xl xl:grid-cols-[1.08fr_0.92fr] xl:items-center xl:p-8',
           },
-          h('div', { className: 'space-y-8' },
-            h('div', { className: 'flex items-center gap-4' }, h(Logo, {}), h('div', null, h('div', { className: 'text-xl font-semibold tracking-tight text-slate-900' }, 'TaskHub'), h('div', { className: 'text-sm text-slate-500' }, 'Task management workspace'))),
+          h('div', { className: 'space-y-8 self-center lg:pr-4' },
+            h('div', { className: 'flex items-center gap-4' }, h(Logo, { compact: true }), h('div', { className: 'leading-tight' }, h('div', { className: 'text-xl font-semibold tracking-tight text-slate-900' }, 'TaskHub'), h('div', { className: 'text-sm text-slate-500' }, 'Task management dashboard'))),
+            h('div', { className: 'inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.22em] text-blue-700' }, h('span', { className: 'h-2 w-2 rounded-full bg-blue-600' }), 'Secure access'),
             h('div', { className: 'space-y-5' },
-              h('p', { className: 'text-sm font-semibold uppercase tracking-[0.28em] text-blue-600' }, 'Work management dashboard'),
-              h('h1', { className: 'max-w-xl text-4xl font-semibold tracking-tight text-slate-900 sm:text-5xl' }, 'Modern task tracking for teams that want a clean professional workflow.'),
-              h('p', { className: 'max-w-2xl text-base leading-7 text-slate-600 sm:text-lg' }, 'TaskHub keeps your workspace focused with a polished interface, simple task flow, and clear status visibility that feels like a real SaaS product.')
+              h('p', { className: 'text-sm font-semibold uppercase tracking-[0.28em] text-blue-600' }, 'Workspace overview'),
+              h('h1', { className: 'max-w-xl text-4xl font-semibold tracking-tight text-slate-900 sm:text-5xl xl:text-[3.6rem] xl:leading-[1.02]' }, 'A focused workspace for managing tasks with clarity and control.'),
+              h('p', { className: 'max-w-2xl text-base leading-7 text-slate-600 sm:text-lg' }, 'TaskHub provides a refined interface for organized task management, clear status visibility, and smooth day-to-day coordination.')
             ),
-            h('div', { className: 'flex flex-wrap items-center gap-3' }, h('button', { className: 'rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-800', onClick: handleLogin }, 'Sign in with Google'), h('span', { className: 'text-sm text-slate-500' }, 'Private dashboard • Clean UI • Fast updates'))
+            h('div', { className: 'flex flex-wrap items-center gap-4' },
+              h('button', { className: 'rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-[0_16px_32px_rgba(15,23,42,0.18)] transition hover:-translate-y-0.5 hover:bg-slate-800', onClick: handleLogin }, 'Continue with Google'),
+              h('div', { className: 'flex flex-wrap items-center gap-2 text-sm text-slate-500' },
+                h('span', { className: 'rounded-full border border-slate-200 bg-white/80 px-3 py-2' }, 'Private dashboard'),
+                h('span', { className: 'rounded-full border border-slate-200 bg-white/80 px-3 py-2' }, 'Structured UI'),
+                h('span', { className: 'rounded-full border border-slate-200 bg-white/80 px-3 py-2' }, 'Reliable updates')
+              )
+            ),
+            h('div', { className: 'grid max-w-xl grid-cols-3 gap-3' },
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '99%'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Visibility')),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '3'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Status levels')),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '1 tap'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Google access'))
+            )
           ),
-          h('div', { className: 'grid gap-4 rounded-[28px] border border-slate-200 bg-slate-50 p-5 sm:grid-cols-2 xl:grid-cols-1' },
-            h('div', { className: 'rounded-2xl bg-white p-5 shadow-sm' }, h('div', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-blue-600' }, 'Overview'), h('div', { className: 'mt-2 text-lg font-semibold text-slate-900' }, 'Structured workspace'), h('p', { className: 'mt-2 text-sm leading-6 text-slate-500' }, 'The layout is tuned for clarity, balance, and modern product presentation.')),
+          h('div', { className: 'grid self-center gap-4 rounded-[28px] border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-5 shadow-[0_20px_50px_rgba(15,23,42,0.06)] sm:grid-cols-2 xl:grid-cols-1' },
+            h('div', { className: 'rounded-[24px] border border-white bg-gradient-to-br from-white to-slate-50 p-5 shadow-sm' },
+              h('div', { className: 'text-xs font-semibold uppercase tracking-[0.24em] text-blue-600' }, 'Overview'),
+              h('div', { className: 'mt-2 text-lg font-semibold text-slate-900' }, 'Workspace structure'),
+              h('p', { className: 'mt-2 text-sm leading-6 text-slate-500' }, 'A clear layout designed to support focus, balance, and efficient task review.')
+            ),
             h('div', { className: 'grid grid-cols-2 gap-3' },
-              h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '01'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Focused flow')),
-              h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '02'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Balanced cards')),
-              h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '03'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Clear typography')),
-              h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '04'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Responsive layout'))
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '01'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Workflow clarity')),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '02'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Consistent spacing')),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '03'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Readable hierarchy')),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm' }, h('div', { className: 'text-2xl font-semibold text-slate-900' }, '04'), h('div', { className: 'mt-1 text-sm text-slate-500' }, 'Responsive design'))
             )
           )
         )
@@ -696,8 +814,8 @@ function App() {
         // Main Navigation - Horizontal
         h(
           'nav',
-          { className: 'hidden sm:flex items-center gap-1' },
-          NAV_ITEMS.map((item) =>
+          { className: 'flex flex-wrap items-center gap-1' },
+          visibleNavItems.map((item) =>
             h(
               motion.button,
               {
@@ -1226,6 +1344,150 @@ function App() {
                     )
               )
             )
+          )
+        )
+      ),
+      // Calendar Page
+      currentPage === 'Calendar' && h(
+        motion.div,
+        { initial: { opacity: 0, y: 20 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.5 } },
+        h('div', { className: 'space-y-6' },
+          h('div', { className: 'space-y-2' },
+            h('h1', { className: 'text-3xl font-bold tracking-tight text-slate-900' }, 'Calendar'),
+            h('p', { className: 'text-sm text-slate-600' }, 'View task activity across the full year without changing months')
+          ),
+          h('div', { className: 'grid gap-4 lg:grid-cols-[1.5fr_0.5fr]' },
+            h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-6 shadow-sm' },
+              h('div', { className: 'mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between' },
+                h('div', null,
+                  h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-blue-600' }, 'Year view'),
+                  h('h2', { className: 'mt-1 text-lg font-bold text-slate-900' }, new Date().getFullYear())
+                ),
+                h('div', { className: 'text-sm text-slate-500' }, `${tasks.length} total tasks`)
+              ),
+              h('div', { className: 'grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3' },
+                calendarMonths.map((month) =>
+                  h(
+                    'article',
+                    {
+                      key: month.monthIndex,
+                      className: cn(
+                        'rounded-2xl border p-4 transition',
+                        month.isCurrentMonth ? 'border-blue-300 bg-blue-50/70 ring-1 ring-blue-100' : 'border-slate-200 bg-slate-50'
+                      ),
+                    },
+                    h('div', { className: 'flex items-start justify-between gap-3' },
+                      h('div', null,
+                        h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-blue-600' }, month.label),
+                        h('h3', { className: 'mt-1 text-lg font-bold text-slate-900' }, `${month.total} task${month.total === 1 ? '' : 's'}`)
+                      ),
+                      month.isCurrentMonth ? h('span', { className: 'rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white' }, 'Current') : null
+                    ),
+                    h('div', { className: 'mt-4 space-y-2 text-sm text-slate-600' },
+                      h('div', { className: 'flex items-center justify-between' }, h('span', null, 'Completed'), h('strong', { className: 'text-slate-900' }, month.completed)),
+                      h('div', { className: 'flex items-center justify-between' }, h('span', null, 'In progress'), h('strong', { className: 'text-slate-900' }, month.inProgress)),
+                      h('div', { className: 'flex items-center justify-between' }, h('span', null, 'Planned'), h('strong', { className: 'text-slate-900' }, month.planned))
+                    ),
+                    h('div', { className: 'mt-4 h-2 overflow-hidden rounded-full bg-white' },
+                      h('div', {
+                        className: 'h-full rounded-full bg-gradient-to-r from-blue-600 to-indigo-600',
+                        style: { width: `${month.total === 0 ? 0 : Math.max(10, Math.min(100, (month.completed / month.total) * 100))}%` },
+                      })
+                    ),
+                    h('div', { className: 'mt-4 space-y-1' },
+                      month.tasks.slice(0, 3).map((task) =>
+                        h('div', { key: task._id, className: 'truncate rounded-lg bg-white px-3 py-2 text-xs text-slate-600' }, task.title)
+                      ),
+                      month.total === 0 ? h('div', { className: 'rounded-lg bg-white px-3 py-2 text-xs text-slate-400' }, 'No tasks this month') : null
+                    )
+                  )
+                )
+              )
+            ),
+            h('div', { className: 'space-y-4' },
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm' },
+                h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-blue-600' }, 'Year summary'),
+                h('h3', { className: 'mt-2 text-lg font-bold text-slate-900' }, 'Calendar summary'),
+                h('div', { className: 'mt-4 space-y-3 text-sm text-slate-600' },
+                  h('div', { className: 'flex items-center justify-between' }, h('span', null, 'Tasks this year'), h('strong', { className: 'text-slate-900' }, tasks.length)),
+                  h('div', { className: 'flex items-center justify-between' }, h('span', null, 'Completed'), h('strong', { className: 'text-slate-900' }, stats.complete)),
+                  h('div', { className: 'flex items-center justify-between' }, h('span', null, 'In progress'), h('strong', { className: 'text-slate-900' }, stats.inprogress))
+                )
+              ),
+              h('div', { className: 'rounded-2xl border border-slate-200 bg-gradient-to-br from-blue-50 to-indigo-50 p-5 shadow-sm' },
+                h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-blue-600' }, 'Tip'),
+                h('h3', { className: 'mt-2 text-lg font-bold text-slate-900' }, 'Use Calendar to review monthly workload'),
+                h('p', { className: 'mt-2 text-sm leading-6 text-slate-600' }, 'Open this view for a full-year snapshot of task distribution and completion patterns.')
+              )
+            )
+          )
+        )
+      ),
+      // Admin Page
+      currentPage === 'Admin' && h(
+        motion.div,
+        { initial: { opacity: 0, y: 20 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.5 } },
+        h('div', { className: 'space-y-6' },
+          h('div', { className: 'space-y-2' },
+            h('h1', { className: 'text-3xl font-bold tracking-tight text-slate-900' }, 'Admin Dashboard'),
+            h('p', { className: 'text-sm text-slate-600' }, 'Monitor all users, their progress, and current workload from one place')
+          ),
+          loading ? h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-6 shadow-sm' }, h(Spinner)) : null,
+          h('div', { className: 'grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4' },
+            h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm' },
+              h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-slate-500' }, 'Total users'),
+              h('div', { className: 'mt-2 text-2xl font-bold text-slate-900' }, adminOverview?.summary?.totalUsers ?? 0)
+            ),
+            h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm' },
+              h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-slate-500' }, 'Total tasks'),
+              h('div', { className: 'mt-2 text-2xl font-bold text-slate-900' }, adminOverview?.summary?.totalTasks ?? tasks.length)
+            ),
+            h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm' },
+              h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-slate-500' }, 'Completion rate'),
+              h('div', { className: 'mt-2 text-2xl font-bold text-slate-900' }, `${adminOverview?.summary?.progress ?? stats.progress}%`)
+            ),
+            h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm' },
+              h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-slate-500' }, 'In progress'),
+              h('div', { className: 'mt-2 text-2xl font-bold text-slate-900' }, adminOverview?.summary?.inProgress ?? stats.inprogress)
+            )
+          ),
+          h('div', { className: 'grid gap-4 xl:grid-cols-2' },
+            (adminOverview?.users || []).length === 0
+              ? h('div', { className: 'rounded-2xl border border-slate-200 bg-white p-6 shadow-sm xl:col-span-2' },
+                  h('p', { className: 'text-sm text-slate-500' }, 'No user data is available yet. Once users create tasks, their progress will appear here.')
+                )
+              : adminOverview.users.map((member) =>
+                  h(
+                    'article',
+                    { key: member.userId, className: 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm' },
+                    h('div', { className: 'flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between' },
+                      h('div', null,
+                        h('h3', { className: 'text-lg font-bold text-slate-900' }, member.userName || member.userEmail || `User ${member.userId.slice(0, 6)}`),
+                        h('p', { className: 'text-sm text-slate-500' }, member.userEmail || member.userId)
+                      ),
+                      h('div', { className: 'rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700' }, `${member.progress}% complete`)
+                    ),
+                    h('div', { className: 'mt-4 h-2 overflow-hidden rounded-full bg-slate-100' },
+                      h('div', { className: 'h-full rounded-full bg-gradient-to-r from-blue-600 to-indigo-600', style: { width: `${member.progress}%` } })
+                    ),
+                    h('div', { className: 'mt-4 grid grid-cols-3 gap-2 text-sm' },
+                      h('div', { className: 'rounded-xl bg-slate-50 p-3' }, h('div', { className: 'text-xs text-slate-500' }, 'Total'), h('div', { className: 'mt-1 font-bold text-slate-900' }, member.total)),
+                      h('div', { className: 'rounded-xl bg-slate-50 p-3' }, h('div', { className: 'text-xs text-slate-500' }, 'Active'), h('div', { className: 'mt-1 font-bold text-slate-900' }, member.inProgress)),
+                      h('div', { className: 'rounded-xl bg-slate-50 p-3' }, h('div', { className: 'text-xs text-slate-500' }, 'Done'), h('div', { className: 'mt-1 font-bold text-slate-900' }, member.complete))
+                    ),
+                    h('div', { className: 'mt-4 space-y-2' },
+                      h('p', { className: 'text-xs font-semibold uppercase tracking-wider text-slate-500' }, 'Recent tasks'),
+                      member.recentTasks.length > 0
+                        ? member.recentTasks.map((task) =>
+                            h('div', { key: task.id, className: 'flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm' },
+                              h('span', { className: 'truncate text-slate-700' }, task.title),
+                              h('span', { className: 'shrink-0 rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-500' }, task.status)
+                            )
+                          )
+                        : h('div', { className: 'rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-400' }, 'No recent tasks')
+                    )
+                  )
+                )
           )
         )
       ),
